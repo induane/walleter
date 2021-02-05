@@ -8,9 +8,9 @@ import pkg_resources
 import sys
 import time
 from logging.config import dictConfig
+from random import shuffle
 
 # Boltons
-from boltons.iterutils import windowed_iter
 from log_color import ColorFormatter, ColorStripper
 
 # Project
@@ -31,9 +31,68 @@ except pkg_resources.DistributionNotFound:
 except Exception:
     pkg_version = '%(prog)s Unknown'
 
-# Py Compat
-if sys.version_info[0] == 3:
-    xrange = range
+
+def shuffle_str(value):
+    value = list(value)  # Convert to array of chars
+    shuffle(value)
+    return ''.join(value)
+
+
+def factorial(value):
+    # check if the number is negative, positive or zero
+    if value < 0:
+        raise ValueError("Value cannot be negative")
+    elif value == 0:
+        return 1
+    else:
+        f = 1  # starting value
+        for i in xrange(1, value + 1):
+            f = f * i
+        return f
+
+
+def calulate_total_permutations(value):
+    """Calulate how many possible permutations are possible for a string."""
+    if len(value) == len(set(value)):
+        return factorial(len(value))
+
+    count_map = {}
+    for char in value:
+        if char in count_map:
+            count_map[char] += 1
+        else:
+            count_map[char] = 1
+
+    base_factor = factorial(len(value))
+    additional_factors = [factorial(x) for x in count_map.values()]
+    result = 1
+    for x in additional_factors:
+        result = result * x
+    return base_factor / result
+
+
+def permutations(value):
+    """
+    Yield anagrams of a given string.
+
+    This is a generator; in some cases it'll be slower than just calculating
+    all possible anagrams but it's good enough. On the first iteration, always
+    return the initial value.
+    """
+    seen = {value}
+    possible = calulate_total_permutations(value)
+    yield value
+    LOG.info("%s has %s possible combinations", value, possible)
+    while True:
+        if len(seen) >= possible:
+            break
+        anagram = shuffle_str(value)
+        while True:
+            if anagram not in seen:
+                seen.add(anagram)
+                break
+            anagram = shuffle_str(anagram)
+        yield anagram
 
 
 def logging_init(level, logfile=None, verbose=False):
@@ -102,7 +161,6 @@ def logging_init(level, logfile=None, verbose=False):
     dictConfig(BASE_CONFIG)
 
 
-
 def cli():
     parser = argparse.ArgumentParser(
         description="Wallet exploration tool",
@@ -115,6 +173,12 @@ def cli():
         type=int,
         default=1,
         help="Number of iterations to derive"
+    )
+    parser.add_argument(
+        "--anagrams",
+        dest="anagrams",
+        action='store_true',
+        help="Check all anagrams of seed"
     )
     parser.add_argument(
         "-b",
@@ -156,25 +220,65 @@ def cli():
     parsed_args = parser.parse_args()
     logging_init(parsed_args.log_level, logfile=parsed_args.logfile)
     run(parsed_args.iterations,
-        force_seed=parsed_args.seed, bypass=parsed_args.bypass)
+        force_seed=parsed_args.seed, bypass=parsed_args.bypass, anagrams=parsed_args.anagrams)
     LOG.debug(u"#g<\u2713> Complete! Dataset exhausted.")
 
 
-def iter_wallets(wallet, iterations):
+def yield_wallet_anagrams(seed, cache):
+    for seed_val in permutations(seed):
+        wallet = Wallet(seed_val)
+        if wallet.address in cache:
+            LOG.info("Skipping previously tried address: %s", wallet.address)
+            continue
+        else:
+            LOG.info("Created wallet from seed: %s", seed_val)
+            yield wallet
+
+
+def iter_anagram_wallets(seed, cache, iterations):
+    if iterations == 1:
+        for wallet in yield_wallet_anagrams(seed, cache):
+            yield wallet
+    else:
+        for wallet in yield_wallet_anagrams(seed, cache):
+            prev = None
+            for i in xrange(iterations):
+                if prev is None:
+                    prev = wallet.address
+                    yield wallet
+                else:
+                    new_wallet = Wallet(prev)
+                    if new_wallet.address in cache:
+                        LOG.info("Skipping previously tried address: %s from seed %", new_wallet.address, prev)
+                        prev = new_wallet.address
+                        continue
+                    else:
+                        LOG.info("Created wallet from seed: %s", prev)
+                        prev = new_wallet.address
+                        yield new_wallet
+
+
+def iter_wallets(seed, cache, iterations):
     """Iterate a wallet feeding it's address into the next iteration."""
     prev = None
-    for idx in xrange(iterations):
-        if not prev:
-            prev = wallet.address
-            yield wallet
-        else:
-            try:
-                new = Wallet(prev)
-            except Exception:
-                break
+    initial_wallet = Wallet(seed)
+    for i in xrange(iterations):
+        if prev is None:
+            prev = initial_wallet.address
+            if initial_wallet.address in cache:
+                LOG.info("Skipping previously tried address: %s from seed %", initial_wallet.address, seed)
+                continue
             else:
-                prev = new.address
-                yield new
+                yield initial_wallet
+        else:
+            new_wallet = Wallet(prev)
+            orig_prev = prev
+            prev = new_wallet.address
+            if new_wallet.address in cache:
+                LOG.info("Skipping previously tried address: %s from seed %", new_wallet.address, orig_prev)
+                continue
+            else:
+                yield new_wallet
 
 
 def main():
@@ -188,8 +292,11 @@ def main():
         sys.exit(errno.EINTR)
 
 
-def run(iterations, force_seed=None, bypass=False):
+def run(iterations, **kwargs):
     """Actual code shit."""
+    force_seed = kwargs.get('force_seed', None)
+    bypass = kwargs.get('bypass', False)
+    anagrams = kwargs.get('anagrams', False)
 
     home_folder = os.path.expanduser('~')
     config_dir = os.path.join(home_folder, '.walleter')
@@ -205,47 +312,40 @@ def run(iterations, force_seed=None, bypass=False):
     block_info.open_session()
     LOG.info("Session open")
 
-    cache = []
+    LOG.info("Loading previously checked address cache...")
+    cache = set()
     if os.path.exists(cache_file):
         with open(cache_file, 'rb') as f:
-            cache = [x.strip().strip('\r\n').strip('\n') for x
-                     in f.readlines()]
+            for l in f.readlines():
+                cache.add(l.strip().strip('\r\n').strip('\n'))
+    LOG.info("Done!")
 
     # If given a specific seed, conjure a dataset from that
     if force_seed is not None:
         if force_seed in ('""', '\'\''):
             force_seed = ''
         all_data = [force_seed]
-        LOG.info('Using custom seed: {0}'.format(force_seed))
+        LOG.info('Using custom seed instead of word list')
     else:
         from data import all_data_iter as all_data
 
     tried = set()
     for dict_word in all_data:
         dict_word = dict_word.strip()
-
         if dict_word in tried:
             continue  # already did that this session
-
         tried.add(dict_word)
-        LOG.debug('Dict word: "{0}"'.format(dict_word))
 
-        # Create initial wallet
-        try:
-            wallet = Wallet(dict_word)
-        except Exception:
-            continue
+        if anagrams:
+            wallet_iter = iter_anagram_wallets(dict_word, cache, iterations)
+        else:
+            wallet_iter = iter_wallets(dict_word, cache, iterations)
 
-        for idx, wallet in enumerate(iter_wallets(wallet, iterations)):
-
+        for idx, wallet in enumerate(wallet_iter):
             if bypass and idx + 1 != iterations:
                 continue
 
-            if wallet.address in cache:
-                LOG.debug('Skipping cached address')
-                continue
-
-            LOG.debug('Checking address: {0}'.format(wallet.address))
+            LOG.info('Checking address "%s" for coins...', wallet.address)
 
             # Get received bitcoins
             retry = 0
@@ -264,10 +364,10 @@ def run(iterations, force_seed=None, bypass=False):
 
             if not received_bitcoins:
                 LOG.info('Wallet never had any coins. Moving along...')
-
+                cache.add(wallet.address)
                 # Write address to cache file
                 with open(cache_file, 'a') as f:
-                    f.write("{0}\n".format(wallet.address))
+                    f.write("{}\n".format(wallet.address))
                 continue
 
             # Get current balance
@@ -281,14 +381,13 @@ def run(iterations, force_seed=None, bypass=False):
                     time.sleep(5)
                     retry += 1
             else:
-                LOG.error('Retries exceeded; skipping.'.format(retry_count))
+                LOG.error('Retries exceeded; skipping.')
                 continue
 
             if balance == 0.00:
                 balance_str = '#y<{:.8f}>'.format(balance)
             else:
                 balance_str = '#g<{:.8f}>'.format(balance)
-
 
             # Output results
             output = (
