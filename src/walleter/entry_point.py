@@ -10,7 +10,7 @@ import time
 from logging.config import dictConfig
 from random import shuffle
 
-# Boltons
+# Third Party
 from log_color import ColorFormatter, ColorStripper
 
 # Project
@@ -266,7 +266,7 @@ def iter_wallets(seed, cache, iterations):
         if prev is None:
             prev = initial_wallet.address
             if initial_wallet.address in cache:
-                LOG.info("Skipping previously tried address: %s from seed %", initial_wallet.address, seed)
+                LOG.info("Skipping previously tried address: #y<%s> from seed #y<%s>", initial_wallet.address, seed)
                 continue
             else:
                 yield initial_wallet
@@ -275,7 +275,7 @@ def iter_wallets(seed, cache, iterations):
             orig_prev = prev
             prev = new_wallet.address
             if new_wallet.address in cache:
-                LOG.info("Skipping previously tried address: %s from seed %", new_wallet.address, orig_prev)
+                LOG.info("Skipping previously tried address: #y<%s> from seed #y<%s>", new_wallet.address, orig_prev)
                 continue
             else:
                 yield new_wallet
@@ -343,9 +343,9 @@ def run(iterations, **kwargs):
 
         for idx, wallet in enumerate(wallet_iter):
             if bypass and idx + 1 != iterations:
+                LOG.info("Bypass: %s of %s", idx + 1, iterations)
                 continue
-
-            LOG.info('Checking address "%s" for coins...', wallet.address)
+            LOG.info('Checking address "#c<%s>" for coins...', wallet.address)
 
             # Get received bitcoins
             retry = 0
@@ -376,8 +376,8 @@ def run(iterations, **kwargs):
                     balance = block_info.get_balance(wallet.address)
                     break
                 except Exception:
-                    LOG.warning('Response invallid for balance. Retrying in '
-                                '5seconds.')
+                    LOG.warning('Response invalid for balance. Retrying in '
+                                '5 seconds.')
                     time.sleep(5)
                     retry += 1
             else:
